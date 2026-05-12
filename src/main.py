@@ -1,69 +1,57 @@
-from flask import Flask, jsonify, request
-from scrapers.rutracker import scrape_rutracker
-from core.models import SearchResponse, Post
-import time
-import threading
-
-app = Flask(__name__)
-
-debug = False
-port = 8080
-cache = {}
-cache_lock = threading.Lock()
-pending_locks = {}  # Per-search-term locks to prevent duplicate fetches
+import asyncio
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Query, HTTPException
+from core.models import SearchResponse
+from core.cache import evict_expired, get_cached, set_cached, get_or_create_pending_lock
+from scrapers import SCRAPERS
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(evict_expired())
+    yield
+    task.cancel()
 
-@app.route('/search')
-def search():
-    search_term = request.args.get("q", "")
 
-    if not search_term:
-        err = SearchResponse(success=False, query="", data=[], count=0)
-        return jsonify(err.to_dict()), 400
+app = FastAPI(lifespan=lifespan)
 
-    current_time = time.time()
-    
-    with cache_lock:
-        expired_keys = [key for key, (response, timestamp) in cache.items() if current_time - timestamp >= 300]
-        for key in expired_keys:
-            del cache[key]
-            if key in pending_locks:
-                del pending_locks[key]
-        
-        if search_term in cache:
-            response_dict, timestamp = cache[search_term]
-            result = response_dict.copy()
-            result["cached"] = True
-            return jsonify(result), 200
-        
-        if search_term not in pending_locks:
-            pending_locks[search_term] = threading.Lock()
-        term_lock = pending_locks[search_term]
-    
-    with term_lock:
-        with cache_lock:
-            if search_term in cache:
-                response_dict, timestamp = cache[search_term]
-                result = response_dict.copy()
-                result["cached"] = True
-                return jsonify(result), 200
-        
-        try:
-            response = scrape_rutracker(search_term)
-            response_dict = response.to_dict()
-            with cache_lock:
-                cache[search_term] = (response_dict, time.time())
-            return jsonify(response_dict), 200
-        except RuntimeError as e:
-            err = SearchResponse(success=False, query=search_term, data=[], count=0)
-            return jsonify(err.to_dict()), 502
 
-# caching was made with help of ai
+@app.get("/search")
+async def search(q: str = Query(default="")):
+    if not q:
+        raise HTTPException(status_code=400, detail=SearchResponse(
+            success=False, query="", data=[], count=0
+        ).to_dict())
 
-@app.route("/ping")
-def upping():
-    return jsonify({"message": "pong"}), 200
+    cached = await get_cached(q)
+    if cached:
+        return cached
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=port)
+    term_lock = await get_or_create_pending_lock(q)
+
+    async with term_lock:
+        cached = await get_cached(q)
+        if cached:
+            return cached
+
+        loop = asyncio.get_event_loop()
+        results = await asyncio.gather(*[
+            loop.run_in_executor(None, scraper.scrape, q)
+            for scraper in SCRAPERS
+        ], return_exceptions=True)
+
+        all_posts = []
+        for r in results:
+            if isinstance(r, Exception):
+                continue
+            all_posts.extend(r.data)
+
+        response = SearchResponse(success=True, query=q, data=all_posts, count=len(all_posts))
+        response_dict = response.to_dict()
+        await set_cached(q, response_dict)
+        return response_dict
+
+
+@app.get("/ping")
+async def ping():
+    return {"message": "pong"}
