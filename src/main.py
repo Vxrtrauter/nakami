@@ -3,7 +3,12 @@ import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Query, HTTPException
 from core.models import SearchResponse
-from core.cache import init_redis, close_redis, get_cached, set_cached, acquire_pending_lock, release_pending_lock, redis
+from core.cache import (
+    init_redis, close_redis,
+    get_redis,
+    get_cached, set_cached,
+    acquire_pending_lock, release_pending_lock
+)
 from scrapers import SCRAPERS
 
 PUBSUB_CHANNEL = "cache_ready:"
@@ -20,7 +25,7 @@ app = FastAPI(lifespan=lifespan)
 
 
 async def wait_for_result(q: str, timeout: float = 10.0) -> dict | None:
-    pubsub = redis.pubsub()
+    pubsub = get_redis().pubsub()
     await pubsub.subscribe(PUBSUB_CHANNEL + q)
     try:
         deadline = asyncio.get_event_loop().time() + timeout
@@ -74,7 +79,7 @@ async def search(q: str = Query(default="")):
         response_dict = response.to_dict()
 
         await set_cached(q, response_dict)
-        await redis.publish(PUBSUB_CHANNEL + q, "ready")
+        await get_redis().publish(PUBSUB_CHANNEL + q, "ready")
 
         return response_dict
 
