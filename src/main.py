@@ -1,19 +1,37 @@
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Query, HTTPException
 from core.models import SearchResponse
-from core.cache import evict_expired, get_cached, set_cached, get_or_create_pending_lock
+from core.cache import init_redis, close_redis, get_cached, set_cached, acquire_pending_lock, release_pending_lock, redis
 from scrapers import SCRAPERS
+
+PUBSUB_CHANNEL = "cache_ready:"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    task = asyncio.create_task(evict_expired())
+    await init_redis(os.getenv("REDIS_URL", "redis://localhost:6379"))
     yield
-    task.cancel()
+    await close_redis()
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+async def wait_for_result(q: str, timeout: float = 10.0) -> dict | None:
+    pubsub = redis.pubsub()
+    await pubsub.subscribe(PUBSUB_CHANNEL + q)
+    try:
+        deadline = asyncio.get_event_loop().time() + timeout
+        async for message in pubsub.listen():
+            if message["type"] == "message":
+                return await get_cached(q)
+            if asyncio.get_event_loop().time() > deadline:
+                return None
+    finally:
+        await pubsub.unsubscribe(PUBSUB_CHANNEL + q)
+        await pubsub.aclose()
 
 
 @app.get("/search")
@@ -27,9 +45,15 @@ async def search(q: str = Query(default="")):
     if cached:
         return cached
 
-    term_lock = await get_or_create_pending_lock(q)
+    got_lock = await acquire_pending_lock(q)
 
-    async with term_lock:
+    if not got_lock:
+        result = await wait_for_result(q)
+        if result:
+            return result
+        raise HTTPException(status_code=503, detail="Result not ready, retry shortly")
+
+    try:
         cached = await get_cached(q)
         if cached:
             return cached
@@ -48,8 +72,14 @@ async def search(q: str = Query(default="")):
 
         response = SearchResponse(success=True, query=q, data=all_posts, count=len(all_posts))
         response_dict = response.to_dict()
+
         await set_cached(q, response_dict)
+        await redis.publish(PUBSUB_CHANNEL + q, "ready")
+
         return response_dict
+
+    finally:
+        await release_pending_lock(q)
 
 
 @app.get("/ping")

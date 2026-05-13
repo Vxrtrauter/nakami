@@ -1,40 +1,40 @@
-import asyncio
+import json
 import time
+import redis.asyncio as aioredis
 
 CACHE_TTL = 300
+LOCK_TTL = 30  # max seconds a pending lock is held before auto-release
 
-cache: dict[str, tuple[dict, float]] = {}
-cache_lock = asyncio.Lock()
-pending_locks: dict[str, asyncio.Lock] = {}
+redis: aioredis.Redis = None
 
 
-async def evict_expired():
-    while True:
-        await asyncio.sleep(60)
-        now = time.time()
-        async with cache_lock:
-            expired = [k for k, (_, ts) in cache.items() if now - ts >= CACHE_TTL]
-            for k in expired:
-                del cache[k]
-                pending_locks.pop(k, None)
+async def init_redis(url: str = "redis://localhost:6379"):
+    global redis
+    redis = aioredis.from_url(url, decode_responses=True)
+
+
+async def close_redis():
+    await redis.aclose()
 
 
 async def get_cached(q: str) -> dict | None:
-    async with cache_lock:
-        if q in cache:
-            result = cache[q][0].copy()
-            result["cached"] = True
-            return result
-    return None
+    raw = await redis.get(f"cache:{q}")
+    if raw is None:
+        return None
+    result = json.loads(raw)
+    result["cached"] = True
+    return result
 
 
 async def set_cached(q: str, response_dict: dict):
-    async with cache_lock:
-        cache[q] = (response_dict, time.time())
+    await redis.set(f"cache:{q}", json.dumps(response_dict), ex=CACHE_TTL)
 
 
-async def get_or_create_pending_lock(q: str) -> asyncio.Lock:
-    async with cache_lock:
-        if q not in pending_locks:
-            pending_locks[q] = asyncio.Lock()
-        return pending_locks[q]
+async def acquire_pending_lock(q: str) -> bool:
+    key = f"pending:{q}"
+    acquired = await redis.set(key, "1", nx=True, ex=LOCK_TTL)
+    return acquired is True
+
+
+async def release_pending_lock(q: str):
+    await redis.delete(f"pending:{q}")

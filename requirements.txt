@@ -1,4 +1,8 @@
-fastapi
-uvicorn
+fastapi[standard]
+uvicorn[standard]
 scrapling
+curl_cffi
 python-dotenv
+playwright
+browserforge
+redis
