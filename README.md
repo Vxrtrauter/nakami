@@ -1,4 +1,4 @@
-# Nakami
+# nakami
 
 A FastAPI-powered server for searching torrent trackers and various web pages. This project provides a unified search API that aggregates results from (soon) multiple scrapers with Redis-based caching for improved performance.
 
@@ -39,7 +39,7 @@ bb_session=your_rutracker_session_cookie
 
 4. Run the server:
 ```bash
-uvicorn src.main:app --reload
+uvicorn src.main:app
 ```
 
 The server will start at `http://localhost:8000`
