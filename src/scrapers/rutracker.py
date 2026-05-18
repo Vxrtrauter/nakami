@@ -36,7 +36,7 @@ class RutrackerScraper:
                 print(response.status)
 
                 if response.status != 200:
-                    break
+                    raise RuntimeError(f"Scraper returned status {response.status}")
 
                 links = response.css("a.med.tLink.tt-text.ts-text.hl-tags.bold[href^='viewtopic']")
 
@@ -72,6 +72,6 @@ class RutrackerScraper:
 
             except Exception as e:
                 print(f"Failed to fetch {search_url}: {e}")
-                break
+                raise
 
         return SearchResponse(success=True, query=query, data=posts, count=len(posts))

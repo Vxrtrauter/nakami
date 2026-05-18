@@ -56,7 +56,7 @@ async def search(q: str = Query(default="")):
         result = await wait_for_result(q)
         if result:
             return result
-        raise HTTPException(status_code=503, detail="Result not ready, retry shortly")
+        return SearchResponse(success=False, query=q, data=[], count=0).to_dict()
 
     try:
         cached = await get_cached(q)
@@ -70,15 +70,19 @@ async def search(q: str = Query(default="")):
         ], return_exceptions=True)
 
         all_posts = []
+        has_errors = False
         for r in results:
             if isinstance(r, Exception):
+                has_errors = True
                 continue
             all_posts.extend(r.data)
 
         response = SearchResponse(success=True, query=q, data=all_posts, count=len(all_posts))
         response_dict = response.to_dict()
 
-        await set_cached(q, response_dict)
+        if all_posts or not has_errors:
+            await set_cached(q, response_dict)
+            
         await get_redis().publish(PUBSUB_CHANNEL + q, "ready")
 
         return response_dict
